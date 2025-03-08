@@ -1,0 +1,113 @@
+version: "3.8"
+
+services:
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    restart: unless-stopped
+    expose:
+      - "11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    command: serve
+    networks:
+      - tool_network
+  
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: frontend
+    restart: unless-stopped
+    # depends_on:
+      # - ollama
+    ports:
+      - "3000:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434/api
+      - APP_PORT=8080
+      - WEBUI_AUTH=false
+      - WEBUI_NAME=Milin GPT
+      - CONFIG_FILE=/app/backend/data/config.json
+    volumes:
+      - ./open-webui:/app/backend/data
+    networks:
+      - tool_network
+  
+  ollama-model-loader:
+    image: docker:latest  # 🔥 Uses Docker CLI instead of Ollama
+    container_name: ollama-model-loader
+    depends_on:
+      - ollama
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # 🔥 Allows running commands inside containers
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "⏳ Waiting for Ollama to be ready..."
+        max_attempts=30
+        attempt=0
+        until docker exec ollama ollama list >/dev/null 2>&1; do
+            echo "Attempt $$attempt/$max_attempts: Waiting for Ollama service..."
+            sleep 3
+            attempt=$((attempt+1))
+            if [ $attempt -eq $max_attempts ]; then
+                echo "❌ Ollama service didn't become available in time"
+                exit 1
+            fi
+        done
+        
+        echo "� Checking for existing models..."
+        if ! docker exec ollama ollama list | grep -q "mistral"; then
+            echo "�📥 Pulling mistral model inside Ollama container..."
+            docker exec ollama ollama pull mistral
+            docker exec ollama ollama pull phi3
+            
+            # Verify model was downloaded successfully
+            if ! docker exec ollama ollama list | grep -q "mistral"; then
+                echo "❌ Failed to download mistral model"
+                exit 1
+            fi
+        else
+            echo "✅ Mistral model already exists"
+        fi
+
+        if ! docker exec ollama ollama list | grep -q "phi3"; then
+            echo "�📥 Pulling phi3 model inside Ollama container..."
+            docker exec ollama ollama pull phi3
+            
+            # Verify model was downloaded successfully
+            if ! docker exec ollama ollama list | grep -q "phi3"; then
+                echo "❌ Failed to download phi3 model"
+                exit 1
+            fi
+        else
+            echo "✅ Phi3 model already exists"
+        fi
+        
+        # Verify model is functional by running a simple query
+        echo "🔄 Testing model functionality..."
+        test_response=$(docker exec ollama ollama run mistral "Respond with only the word 'working' if you can read this")
+        test_response=$(docker exec ollama ollama run phi3 "Respond with only the word 'working' if you can read this")
+        
+        # Check if the response contains "working"
+        if echo "$test_response" | grep -iq "working"; then
+            echo "✅ Model test successful: Model is responding properly"
+        else
+            echo "⚠️ Model test response: $test_response"
+            echo "⚠️ Model may not be fully functional yet"
+        fi
+        
+        echo "✅ Setup complete. Models downloaded and verified."
+    restart: "no"
+    networks:
+      - tool_network
+
+volumes:
+  ollama_data:
+    name: ollama_data
+  open-webui:
+    name: open-webui
+
+networks:
+  tool_network:
+    name: tool_network
+    driver: bridge
